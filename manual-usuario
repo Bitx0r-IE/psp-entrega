@@ -1,0 +1,219 @@
+MANUAL DE USUARIO - SISTEMA DE COMPRA-VENTA DE BILLETES
+
+REQUISITOS PREVIOS
+
+Antes de usar la aplicación, asegurate de tener:
+
+    - Java JDK 8 o superior instalado
+    - Acceso a la consola op terminal
+    - Los archivos .java compilados (Servidor y Cliente)
+
+ARRANCAR EL SERVIDOR
+
+    1. Abre una terminal o consola.
+
+    2. Navega a la carpeta donde se encuentra el archivo Servidor.java compilado.
+
+    3. Ejecuta el servidor con: java org.example.ServidorMain
+
+    o
+
+    1. Desde el IDE de desarrollo haz click en run main seleccionando el file Servidor
+
+    - El servidor escuchará en el puerto 5000 por defecto.
+
+    - El servidor debe permanecer abierto mientras los clientes se conecten.
+
+    - No genera billetes de prueba automáticamente; espera la solicitud del cliente.
+
+
+ARRANCAR EL CLIENTE
+
+    1. Abre otra terminal (puede ser en la misma máquina o en otra red si el servidor es accesible).
+
+    2. Navega a la carpeta donde se encuentra el archivo Cliente.java compilado.
+
+    3. Ejecuta el cliente con: java org.example.Cliente
+
+    4. Al iniciar, el cliente se conectará al servidor y recibirá la clave pública para comunicaciones seguras.
+
+    o
+
+    1. Desde el IDE de desarrollo haz click en run main seleccionando el file Cliente
+
+    2. Al iniciar, el cliente se conectará al servidor y recibirá la clave pública para comunicaciones seguras.
+
+
+USO DEL MENU DEL CLIENTE
+
+    Al iniciar el cliente, se muestra el siguiente menú:
+
+    === Menú Cliente ===
+    1. Registrar usuario
+    2. Listar billetes disponibles
+    3. Comprar billete
+    4. Salir
+    Selecciona una opción:
+
+
+
+REGISTRAR USUARIO (OPCION 1)
+
+    Para poder usar el sistema de compra, primero debes registrarte:
+
+    1. Ingresa los datos solicitados:
+
+        - Nombre
+
+        - Apellido
+
+        - Edad (entre 18 y 120)
+
+        - Email
+
+        - Usuario (4-20 caracteres, letras y números)
+
+        - Contraseña (mínimo 8 caracteres, al menos una mayúscula, una minúscula y un número)
+
+    2. Si la contraseña no cumple el patrón, el sistema la volverá a solicitar hasta que sea segura.
+
+    3. Una vez registrado correctamente, se guardará de forma segura y se generará una clave privada y pública para tu usuario.
+
+    Ejemplo:
+
+        Nombre: Victor
+        Apellido: Ibañez
+        Edad: 22
+        Email: victor@gmail.com
+        Usuario: Bitxor
+        Contraseña: 281202Victor
+        Registro completado con éxito
+
+
+
+LISTAR BILLETES DISPONIBLES (OPCION 2)
+
+    Esta opción permite ver todos los billetes que están disponibles (AVAILABLE) o vendidos (SOLD). A pesar de que se pensó en un inicio 
+    que para poder mostrar el listado de billetes se neceitase estar registrado (que de hecho se hizo y aparece comentado en la función handleClients),
+    se ha optado finalmente por permitir ver el listado de billetes teniendo en cuenta el funcionamiento de otros sistema de gestión de billetes como lo pueden ser 
+    renfe o araba bus.
+    Se mostrará un listado con ID, descripción y estado.
+
+    Ejemplo:
+
+        Billetes disponibles:
+        T1|Billete número 1|AVAILABLE;;
+        T2|Billete número 2|SOLD;;
+        T3|Billete número 3|AVAILABLE;;
+
+
+
+COMPAR BILLETES (OPCION 3)
+
+    Debes haber registrado un usuario para poder comprar. Se pedirá ingresar el ID del billete a comprar (pñor ejemploi, T1 o solo 1 -> el programa se encarga de que si no 
+    contiene una T al inicio el id le agregue una). A continuación se pedirá que se ingrese el username. Se firmará digitalmente la operación y se envia al servidor.
+    El servidor devolverá el estado de la trnasacción.
+
+    Ejemplo:
+
+        ID del billete a comprar: 1
+        Tu usuario: Bitxor
+        Compra realizada
+
+
+    Si el billete ya fue vendido:
+
+        ID del billete a comprar: 1
+        Tu usuario: Bitxor
+        Billete ya vendido
+
+
+
+SALIR DEL SISTEMA (OPCION 4)
+
+    Cierra la conexión con el servidor y termina el cliente.
+
+
+
+CONSIDERACIONES DE SEGURIDAD
+
+    CIFRADO DE CONTRASEÑAS
+
+    - Se utiliza PBKDF2 (PBKDF2WithHmacSHA256), en un inicio me propuse a hacer el haseo de contraseñas un hash simple como SHA-256. Sin embargo tras comentar una tarde un conocido
+    bastante fan de la cryptografia y cifrado de datos me comento de probar a usar PBKDF2 dado que es más seguro y ralentiza ataques siendo que es un cifrado que ha usado en varios casos reales de registro de datos en varios proyectos. El sat evita qe dos ussuarios con la misma contraseña tengan el mismo hash y protege contra tablas precomputadas (rainbow tables). 
+    Al aplicar multiples iteraciones (65536 en mi caso) antes de generar el valor final hace que en caso de un ataque a fuerza bruta este sean mucho más lento.
+
+        public static byte[] pbkdf2(char[] password, byte[] salt) throws Exception {
+            PBEKeySpec spec = new PBEKeySpec(password, salt, 65536, 256);
+            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            return skf.generateSecret(spec).getEncoded();
+        }
+
+        byte[] salt = new byte[16];
+        new SecureRandom().nextBytes(salt);
+        byte[] hash = AuxiliaryClasses.CryptoUtils.pbkdf2(password.toCharArray(), salt);
+
+    Referencia: https://docs.oracle.com/javase/8/docs/api/javax/crypto/SecretKeyFactory.html
+
+
+    CIFRADO DE DATOS ENTRE CLIENTE Y SERVIDOR
+
+    Se usa RSA con OAEP. Permite cifrar información sensible que se envía por la red y garantiza que solo el servidor pueda descifrar los datos enviados por el cliente.
+
+        public static byte[] rsaEncrypt(byte[] data, PublicKey pub) throws Exception {
+            Cipher c = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+            c.init(Cipher.ENCRYPT_MODE, pub);
+            return c.doFinal(data);
+        }
+
+
+        public static byte[] rsaDecrypt(byte[] data, PrivateKey priv) throws Exception {
+            Cipher c = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+            c.init(Cipher.DECRYPT_MODE, priv);
+            return c.doFinal(data);
+        }
+
+
+    FIRMAS DIGITALES
+
+    Se usan RSA con SHA256 para firmar operaciones de compra
+
+    Referenacia: https://docs.oracle.com/javase/8/docs/api/java/security/Signature.html   https://stackoverflow.com/questions/27039489/difference-between-signing-with-sha256-vs-signing-with-rsa-sha256
+
+
+MULTIUSUARIO Y CONCURRENCIA
+
+    El servidor puede atender a varios clientes simultáneamente. Se utiliza un hilo por cliente usando "Thread", esto permite que múltiples clientes puedan conectarse
+    y realizar operacions sin bloquearse entre sí. Cada hilo mantiene su propio OutputInputStream y ObjectInputStream
+
+    Función start() de la clase Servidor (espera a una llamada de cliente para handlear la interacción)
+        
+        public void start() throws Exception {
+            ServerSocket ss = new ServerSocket(port);
+            System.out.println("Servidor escuchando puerto: " + port);
+
+            public void start() throws Exception {
+            ServerSocket ss = new ServerSocket(port);
+            System.out.println("Servidor escuchando puerto: " + port);
+
+            while (true) {
+                Socket s = ss.accept();
+                new Thread(() -> handleClient(s)).start();
+            }
+        }
+
+    Para el acceso seguro a recursos compartidos se hace uso de ConcurrentHashMap y sicronización en cada billete . Se usa ya que ConcurrentHashMap permite el acceso 
+    concurrente (como su propio nombre indica) seguro a los mapas de usuarios y billetes y synchronized evita que dos clientes compren el mismo billete al mismo tiempo.
+
+        synchronized (t) {
+            if (t.status == AuxiliaryClasses.TicketStatus.AVAILABLE) {
+                t.status = AuxiliaryClasses.TicketStatus.SOLD;
+                resp.fields.put("transactionId", transactionId);
+                resp.fields.put("state", "EXITOSA");
+                resp.fields.put("msg", "Compra realizada");
+            } else {
+                resp.fields.put("transactionId", transactionId);
+                resp.fields.put("state", "RECHAZADA");
+                resp.fields.put("msg", "Billete ya vendido");
+            }
+        }

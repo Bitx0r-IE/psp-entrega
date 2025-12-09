@@ -1,40 +1,23 @@
 package org.example;
 
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutput;
-import java.io.ObjectOutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.security.KeyFactory;
-import java.security.KeyPair;
-import java.security.PublicKey;
-import java.security.SecureRandom;
-import java.security.spec.X509EncodedKeySpec;
+import java.io.*;
+import java.net.*;
+import java.security.*;
+import java.security.spec.*;
 import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.security.*;
-import java.security.spec.*;
-import javax.crypto.*;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.SecretKeyFactory;
 
 public class Servidor {
+
     private final int port;
-    private KeyPair serverKeyPair;
+    private final KeyPair serverKeyPair;
     private final Map<String, AuxiliaryClasses.User> users = new ConcurrentHashMap<>();
     private final Map<String, AuxiliaryClasses.Ticket> tickets = new ConcurrentHashMap<>();
 
     public Servidor(int port) throws Exception {
         this.port = port;
-        System.out.println("Servidor escuchando puerto: " + port);
-
-        // Crear 10 billetes de ejemplo
-        for (int i = 1; i <= 10; i++) {
-            String id = "T" + i;
-            tickets.put(id, new AuxiliaryClasses.Ticket(id, "Billete " + i));
-        }
+        this.serverKeyPair = AuxiliaryClasses.CryptoUtils.generateRSAKeyPair();
     }
 
     public void start() throws Exception {
@@ -51,66 +34,109 @@ public class Servidor {
         try (ObjectInputStream in = new ObjectInputStream(s.getInputStream());
              ObjectOutputStream out = new ObjectOutputStream(s.getOutputStream())) {
 
-            // Enviar clave publica del servidor
             AuxiliaryClasses.Message pkmsg = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.PUBLIC_KEY);
             pkmsg.fields.put("serverPub", Base64.getEncoder().encodeToString(serverKeyPair.getPublic().getEncoded()));
             out.writeObject(pkmsg);
 
-            while(true) {
+            while (true) {
                 AuxiliaryClasses.Message msg = (AuxiliaryClasses.Message) in.readObject();
                 switch (msg.type) {
-                    case REGISTER -> handleRegister(msg, out);
+                    case REGISTER -> handleRegisterLoop(msg, out, in);
                     case LIST_TICKETS -> handleList(out);
                     case BUY -> handleBuy(msg, out);
+                    default -> {
+                        AuxiliaryClasses.Message e = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.ERROR);
+                        e.fields.put("msg", "Comando desconocido");
+                        out.writeObject(e);
+                    }
                 }
             }
 
-        } catch(Exception e) {
-            e.printStackTrace();
+        } catch (Exception e) {
+            System.out.println("Cliente desconectado");
         }
     }
 
-    private void handleRegister(AuxiliaryClasses.Message msg, ObjectOutputStream out) throws Exception {
-        String usuario = msg.fields.get("usuario");
-        AuxiliaryClasses.Message resp = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.REGISTER);
+    private void handleRegisterLoop(AuxiliaryClasses.Message msg, ObjectOutputStream out, ObjectInputStream in) throws Exception {
+        boolean registrado = false;
+        while (!registrado) {
+            AuxiliaryClasses.Message resp = validarCamposRegistro(msg);
+            if (resp != null) {
+                out.writeObject(resp);
+                // Esperar nuevo mensaje de registro
+                msg = (AuxiliaryClasses.Message) in.readObject();
+                continue;
+            }
 
-        if(users.containsKey(usuario)) {
-            resp.fields.put("status", "ERROR");
-            resp.fields.put(",msg", "Usuario ya existe");
+            if (!AuxiliaryClasses.Validator.validatePassword(msg.fields.get("passwordRaw"))) {
+                resp = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.REGISTER_RESPONSE);
+                resp.fields.put("status", "ERROR");
+                resp.fields.put("msg", "Contraseña insegura: min 8 chars, mayúscula, minúscula y número");
+                out.writeObject(resp);
+                msg = (AuxiliaryClasses.Message) in.readObject();
+                continue;
+            }
+
+            String usuario = msg.fields.get("usuario");
+            if (users.containsKey(usuario)) {
+                resp = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.REGISTER_RESPONSE);
+                resp.fields.put("status", "ERROR");
+                resp.fields.put("msg", "Usuario ya existe");
+                out.writeObject(resp);
+                msg = (AuxiliaryClasses.Message) in.readObject();
+                continue;
+            }
+
+            byte[] pwdEnc = Base64.getDecoder().decode(msg.fields.get("passwordEncrypted"));
+            byte[] pwdBytes = AuxiliaryClasses.CryptoUtils.rsaDecrypt(pwdEnc, serverKeyPair.getPrivate());
+            String password = new String(pwdBytes);
+
+            byte[] salt = new byte[16];
+            new SecureRandom().nextBytes(salt);
+            byte[] hash = AuxiliaryClasses.CryptoUtils.pbkdf2(password.toCharArray(), salt);
+
+            byte[] pkBytes = Base64.getDecoder().decode(msg.fields.get("clientPub"));
+            PublicKey clientPub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(pkBytes));
+
+            AuxiliaryClasses.User u = new AuxiliaryClasses.User(msg.fields.get("nombre"), msg.fields.get("apellido"), Integer.parseInt(msg.fields.get("edad")), msg.fields.get("email"), usuario, hash, salt, clientPub);
+            users.put(usuario, u);
+
+            resp = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.REGISTER_RESPONSE);
+            resp.fields.put("status", "OK");
+            resp.fields.put("msg", "Registro completado con éxito");
             out.writeObject(resp);
-            return;
+            registrado = true;
         }
+    }
 
-        // Descifrar la contraseña con clave privada del servidor
-        byte[] pwdEnc = Base64.getEncoder().encode(msg.fields.get("passwordEncrypted").getBytes());
-        byte[] pwdBytes = CryptoUtils.rsaDecrypt(pwdEnc, serverKeyPair.getPrivate());
-        String password = new String(pwdBytes);
-
-        // Crear salt y hash PBKDF2
-        byte[] salt = new byte[16];
-        new SecureRandom().nextBytes(salt);
-        byte[] hash = CryptoUtils.pbkdf2(password.toCharArray(), salt);
-
-        // Obtener clave pública del cliente
-        byte[] pkBytes = Base64.getDecoder().decode(msg.fields.get("clientPub"));
-        PublicKey clientPub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(pkBytes));
-
-        // Crear usuario y guardarlo
-        AuxiliaryClasses.User u = new AuxiliaryClasses.User(
-                msg.fields.get("nombre"),
-                msg.fields.get("apellido"),
-                Integer.parseInt(msg.fields.get("edad")),
-                msg.fields.get("email"),
-                usuario,
-                hash,
-                salt,
-                clientPub
-        );
-
-        users.put(usuario, u);
-        resp.fields.put("status", "OK");
-        resp.fields.put("msg", "Registro completado");
-        out.writeObject(resp);
+    private AuxiliaryClasses.Message validarCamposRegistro(AuxiliaryClasses.Message msg) {
+        AuxiliaryClasses.Message err = new AuxiliaryClasses.Message(AuxiliaryClasses.Message.Type.REGISTER_RESPONSE);
+        if (!AuxiliaryClasses.Validator.validateNombre(msg.fields.get("nombre"))) {
+            err.fields.put("status", "ERROR");
+            err.fields.put("msg", "Nombre inválido");
+            return err;
+        }
+        if (!AuxiliaryClasses.Validator.validateApellido(msg.fields.get("apellido"))) {
+            err.fields.put("status", "ERROR");
+            err.fields.put("msg", "Apellido inválido");
+            return err;
+        }
+        if (!AuxiliaryClasses.Validator.validateEdad(msg.fields.get("edad"))) {
+            err.fields.put("status", "ERROR");
+            err.fields.put("msg", "Edad no válida (18-120)");
+            return err;
+        }
+        if (!AuxiliaryClasses.Validator.validateEmail(msg.fields.get("email"))) {
+            err.fields.put("status", "ERROR");
+            err.fields.put("msg", "Email inválido");
+            return err;
+        }
+        if (!AuxiliaryClasses.Validator.validateUsuario(msg.fields.get("usuario"))) {
+            err.fields.put("status", "ERROR");
+            err.fields.put("msg", "Usuario inválido (4-20 alfanuméricos)");
+            return err;
+        }
+        return null;
     }
 
     private void handleList(ObjectOutputStream out) throws IOException {
@@ -139,9 +165,8 @@ public class Servidor {
             return;
         }
 
-        // Verificar firma
         String payload = usuario + "|" + ticketId + "|" + nonce;
-        boolean verified = CryptoUtils.verify(payload.getBytes(), signature, u.publicKey);
+        boolean verified = AuxiliaryClasses.CryptoUtils.verify(payload.getBytes(), signature, u.publicKey);
         if (!verified) {
             resp.fields.put("state", "RECHAZADA");
             resp.fields.put("msg", "Firma inválida");
@@ -149,8 +174,14 @@ public class Servidor {
             return;
         }
 
-        // Intento de compra con sincronización
         AuxiliaryClasses.Ticket t = tickets.get(ticketId);
+        if (t == null) {
+            resp.fields.put("state", "RECHAZADA");
+            resp.fields.put("msg", "Billete no encontrado");
+            out.writeObject(resp);
+            return;
+        }
+
         synchronized (t) {
             if (t.status == AuxiliaryClasses.TicketStatus.AVAILABLE) {
                 t.status = AuxiliaryClasses.TicketStatus.SOLD;
@@ -164,46 +195,15 @@ public class Servidor {
 
         out.writeObject(resp);
     }
-    }
-}
 
-class CryptoUtils {
-
-    public static KeyPair generateRSAKeyPair() throws Exception{
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048);
-        return kpg.generateKeyPair();
-    }
-
-    public static byte[] rsaEncrypt(byte[] data, PublicKey pub) throws Exception{
-        Cipher c = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
-        c.init(Cipher.ENCRYPT_MODE, pub);
-        return c.doFinal(data);
-    }
-
-    public static byte[] rsaDecrypt(byte[] data, PrivateKey priv) throws Exception{
-        Cipher c = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
-        c.init(Cipher.DECRYPT_MODE, priv);
-        return c.doFinal(data);
-    }
-
-    public static byte[] sign(byte[] data, PrivateKey priv) throws Exception{
-        Signature sig = Signature.getInstance("SHA256withRSA");
-        sig.initSign(priv);
-        sig.update(data);
-        return sig.sign();
-    }
-
-    public static boolean verify(byte[] data, byte[] signature, PublicKey pub) throws Exception{
-        Signature sig = Signature.getInstance("SHA256withRSA");
-        sig.initVerify(pub);
-        sig.update(data);
-        return sig.verify(signature);
-    }
-
-    public static byte[] pbkdf2(char[] password, byte[] salt) throws Exception{
-        PBEKeySpec spec = new PBEKeySpec(password, salt, 65536, 256);
-        SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-        return skf.generateSecret(spec).getEncoded();
+    public static void main(String[] args) {
+        int puerto = 5000;
+        try {
+            Servidor servidor = new Servidor(puerto);
+            System.out.println("Servidor iniciado en puerto " + puerto);
+            servidor.start();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }
